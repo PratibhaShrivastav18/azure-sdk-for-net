@@ -785,6 +785,69 @@ public class FineTuningTests : ProjectsClientTestBase
     }
 
     [RecordedTest]
+    public async Task Test_FineTuning_Download_Result_Files()
+    {
+        // This test demonstrates downloading result files from a completed fine-tuning job.
+        // Result files contain training metrics, validation results, and other outputs.
+        // Note: This test requires a pre-completed fine-tuning job with result files.
+        string completedJobId = TestEnvironment.FINE_TUNING_COMPLETED_JOB;
+
+        var (fileClient, fineTuningClient) = GetClients();
+
+        // Retrieve the completed fine-tuning job
+        FineTuningJob completedJob = await fineTuningClient.GetJobAsync(completedJobId);
+        Console.WriteLine($"Retrieved job: {completedJob.JobId}");
+        Console.WriteLine($"Status: {completedJob.Status}");
+
+        // Verify the job is completed successfully
+        Assert.That(completedJob.Status, Is.EqualTo(FineTuningStatus.Succeeded),
+            $"Job must be in succeeded state to have result files. Current status: {completedJob.Status}");
+
+        // Get the result file IDs
+        Assert.That(completedJob.ResultFileIds, Is.Not.Null.And.Not.Empty,
+            "Completed job should have result files");
+
+        Console.WriteLine($"Found {completedJob.ResultFileIds.Count} result file(s)");
+
+        foreach (string resultFileId in completedJob.ResultFileIds)
+        {
+            Console.WriteLine($"Processing result file: {resultFileId}");
+
+            // Retrieve file metadata
+            OpenAIFile fileInfo = await fileClient.GetFileAsync(resultFileId);
+            Console.WriteLine($"  Filename: {fileInfo.Filename}");
+            Console.WriteLine($"  Size: {fileInfo.SizeInBytes} bytes");
+            Console.WriteLine($"  Purpose: {fileInfo.Purpose}");
+
+            Assert.That(fileInfo, Is.Not.Null);
+            Assert.That(fileInfo.Id, Is.EqualTo(resultFileId));
+            Assert.That(fileInfo.Filename, Is.Not.Null.And.Not.Empty);
+
+            // Download the file content
+            BinaryData fileContent = await fileClient.DownloadFileAsync(resultFileId);
+
+            Assert.That(fileContent, Is.Not.Null);
+            Assert.That(fileContent.ToMemory().Length, Is.GreaterThan(0));
+            Console.WriteLine($"  Downloaded {fileContent.ToMemory().Length} bytes");
+
+            // Preview the file content (result files are typically CSV with training metrics)
+            string content = fileContent.ToString();
+            string[] lines = content.Split('\n');
+            Console.WriteLine($"  Content preview (first 15 lines):");
+            foreach (var line in lines.Take(15))
+            {
+                Console.WriteLine($"    {line}");
+            }
+            if (lines.Length > 15)
+            {
+                Console.WriteLine($"    ... ({lines.Length - 15} more lines)");
+            }
+        }
+
+        Console.WriteLine("Successfully downloaded all result files");
+    }
+
+    [RecordedTest]
     public async Task Test_FineTuning_Inference_With_Existing_Deployment()
     {
         // Test inference with an existing fine-tuned model deployment, update this when re-recording
@@ -1153,6 +1216,65 @@ public class FineTuningTests : ProjectsClientTestBase
         Assert.That(deploymentOperation.Value, Is.Not.Null);
         Assert.That(deploymentOperation.Value.Data.Name, Is.EqualTo(deploymentName));
     }
+
+    [Test]
+    // Skip recording since ARM operations are not recorded via the test proxy.
+    [LiveOnly]
+    public async Task Test_Deploy_Model_With_Provisioned_Throughput()
+    {
+        // This test demonstrates deploying a model with Provisioned Throughput Units (PTU).
+        // PTU provides guaranteed throughput capacity for OpenAI models.
+        // Uses GlobalProvisionedManaged SKU for provisioned throughput deployment.
+
+        TestTimeoutInSeconds = 300; // 5 minutes for deployment operations
+
+        // Create ARM client
+        var credential = new DefaultAzureCredential();
+        var armClient = new ArmClient(credential);
+
+        // Get Cognitive Services account
+        var resourceId = CognitiveServicesAccountResource.CreateResourceIdentifier(
+            TestEnvironment.FINE_TUNING_AZURE_SUBSCRIPTION_ID,
+            TestEnvironment.FINE_TUNING_AZURE_RESOURCE_GROUP,
+            TestEnvironment.FINE_TUNING_AZURE_FOUNDRY_NAME);
+        var accountResource = armClient.GetCognitiveServicesAccountResource(resourceId);
+
+        // Configure PTU deployment
+        string deploymentName = $"ptu-deployment-gpt4o-{DateTimeOffset.UtcNow:yyyy-MM-dd-HHmmss}";
+        string modelName = "gpt-4.1";
+        string modelVersion = "2025-04-14";
+
+        Console.WriteLine($"Deploying model '{modelName}' version '{modelVersion}' as '{deploymentName}' with PTU...");
+
+        // Deploy the model with GlobalProvisionedManaged SKU (PTU)
+        var deploymentData = new CognitiveServicesAccountDeploymentData
+        {
+            Properties = new CognitiveServicesAccountDeploymentProperties
+            {
+                Model = new CognitiveServicesAccountDeploymentModel
+                {
+                    Format = "OpenAI",
+                    Name = modelName,
+                    Version = modelVersion
+                },
+                VersionUpgradeOption = DeploymentModelVersionUpgradeOption.OnceNewDefaultVersionAvailable
+            },
+            Sku = new CognitiveServicesSku("GlobalProvisionedManaged") { Capacity = 15 }
+        };
+
+        var deploymentOperation = await accountResource.GetCognitiveServicesAccountDeployments()
+            .CreateOrUpdateAsync(Azure.WaitUntil.Completed, deploymentName, deploymentData);
+
+        Console.WriteLine($"PTU Deployment '{deploymentName}' completed successfully");
+        Console.WriteLine($"SKU: {deploymentOperation.Value.Data.Sku?.Name}");
+        Console.WriteLine($"Capacity: {deploymentOperation.Value.Data.Sku?.Capacity}");
+
+        Assert.That(deploymentOperation, Is.Not.Null);
+        Assert.That(deploymentOperation.Value, Is.Not.Null);
+        Assert.That(deploymentOperation.Value.Data.Name, Is.EqualTo(deploymentName));
+        Assert.That(deploymentOperation.Value.Data.Sku?.Name, Is.EqualTo("GlobalProvisionedManaged"));
+    }
+
     #region Helpers
     private static string GetTestFineTuningFile(string name) => GetTestFile(Path.Combine("FineTuning", name));
 
